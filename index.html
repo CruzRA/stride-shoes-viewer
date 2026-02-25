@@ -262,16 +262,27 @@ function debounce(fn,ms){let t;return(...a)=>{clearTimeout(t);t=setTimeout(()=>f
 
 // ── OVERVIEW ──
 async function loadOverview() {
-  const [prods, custs, orders, emails, tickets, inv] = await Promise.all([
-    sb('/products?select=id'), sb('/customers?select=id'), sb('/orders?select=id,status'),
-    sb('/emails?select=id,is_read'), sb('/tickets?select=id,status'), sb('/inventory?select=id')
+  // Use RPC count to avoid 1000-row default limit
+  async function sbCount(table, filter='') {
+    const r = await fetch(`${SB_URL}/${table}?select=id&limit=0${filter}`, {headers:{...H, 'Prefer':'count=exact'}});
+    const cr = r.headers.get('Content-Range') || '*/0';
+    return parseInt(cr.split('/')[1]) || 0;
+  }
+  const [nProds,nCusts,nOrders,nEmails,nUnread,nTicketsOpen,nInv,nRefunds] = await Promise.all([
+    sbCount('products'), sbCount('customers'), sbCount('orders'), sbCount('emails'),
+    sbCount('emails','&is_read=eq.false'), sbCount('tickets','&status=in.(open,escalated,in_progress)'),
+    sbCount('inventory'), sbCount('orders','&status=eq.refund_requested')
+  ]);
+  // Still fetch small sets for distributions
+  const [orders, emails] = await Promise.all([
+    sb('/orders?select=id,status'), sb('/emails?select=id,is_read')
   ]);
   const stats = [
-    {v:custs.length,l:'Customers',c:'text-indigo-600'}, {v:prods.length,l:'Products',c:'text-purple-600'},
-    {v:orders.length,l:'Orders',c:'text-blue-600'}, {v:inv.length,l:'Inventory SKUs',c:'text-cyan-600'},
-    {v:emails.length,l:'Emails',c:'text-green-600'}, {v:emails.filter(e=>!e.is_read).length,l:'Unread Emails',c:'text-amber-600'},
-    {v:orders.filter(o=>o.status==='refund_requested').length,l:'Pending Refunds',c:'text-red-600'},
-    {v:tickets.filter(t=>['open','escalated','in_progress'].includes(t.status)).length,l:'Open Tickets',c:'text-orange-600'},
+    {v:nCusts,l:'Customers',c:'text-indigo-600'}, {v:nProds,l:'Products',c:'text-purple-600'},
+    {v:nOrders,l:'Orders',c:'text-blue-600'}, {v:nInv,l:'Inventory SKUs',c:'text-cyan-600'},
+    {v:nEmails,l:'Emails',c:'text-green-600'}, {v:nUnread,l:'Unread Emails',c:'text-amber-600'},
+    {v:nRefunds,l:'Pending Refunds',c:'text-red-600'},
+    {v:nTicketsOpen,l:'Open Tickets',c:'text-orange-600'},
   ];
   document.getElementById('stats-grid').innerHTML = stats.map(s=>`<div class="bg-white rounded-xl border p-5"><div class="text-3xl font-bold ${s.c}">${s.v.toLocaleString()}</div><div class="text-xs text-gray-500 mt-1">${s.l}</div></div>`).join('');
 
