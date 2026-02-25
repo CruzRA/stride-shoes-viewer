@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Stride Shoes — Environment Viewer</title>
 <script src="https://cdn.tailwindcss.com"></script>
+<script src="data.js"></script>
 <style>
   body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
   .tab-active { border-bottom: 2px solid #6366f1; color: #6366f1 !important; }
@@ -226,15 +227,7 @@ Store database is on Supabase (&lt;SUPABASE_URL&gt;), apikey: &lt;SUPABASE_ANON_
 </div>
 
 <script>
-// ── CONFIG: reads from Model 1's Supabase (read-only reference) ──
-const SB_URL = 'https://ljyqqwphftqnlwekvzjd.supabase.co/rest/v1';
-const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxqeXFxd3BoZnRxbmx3ZWt2empkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE5ODEwMTUsImV4cCI6MjA4NzU1NzAxNX0.bqiuoCkBEt-nSmelo7EiZSOMXssELYon_LH8fb3VYTM';
-const H = {'apikey': SB_KEY, 'Authorization': `Bearer ${SB_KEY}`};
-
-async function sb(path) {
-  const r = await fetch(`${SB_URL}${path}`, {headers: H});
-  return r.json();
-}
+// ── DATA: hardcoded from local SQLite (no API dependency) ──
 
 // ── TABS ──
 document.querySelectorAll('.tab-btn').forEach(b => b.addEventListener('click', () => {
@@ -262,21 +255,8 @@ function debounce(fn,ms){let t;return(...a)=>{clearTimeout(t);t=setTimeout(()=>f
 
 // ── OVERVIEW ──
 async function loadOverview() {
-  // Use RPC count to avoid 1000-row default limit
-  async function sbCount(table, filter='') {
-    const r = await fetch(`${SB_URL}/${table}?select=id&limit=0${filter}`, {headers:{...H, 'Prefer':'count=exact'}});
-    const cr = r.headers.get('Content-Range') || '*/0';
-    return parseInt(cr.split('/')[1]) || 0;
-  }
-  const [nProds,nCusts,nOrders,nEmails,nUnread,nTicketsOpen,nInv,nRefunds] = await Promise.all([
-    sbCount('products'), sbCount('customers'), sbCount('orders'), sbCount('emails'),
-    sbCount('emails','&is_read=eq.false'), sbCount('tickets','&status=in.(open,escalated,in_progress)'),
-    sbCount('inventory'), sbCount('orders','&status=eq.refund_requested')
-  ]);
-  // Still fetch small sets for distributions
-  const [orders, emails] = await Promise.all([
-    sb('/orders?select=id,status'), sb('/emails?select=id,is_read')
-  ]);
+  const {nProds,nCusts,nOrders,nEmails,nUnread,nTicketsOpen,nInv,nRefunds} = STRIDE_DATA.stats;
+  const orders = STRIDE_DATA.orders_by_status.map(r=>({status:r.status}));
   const stats = [
     {v:nCusts,l:'Customers',c:'text-indigo-600'}, {v:nProds,l:'Products',c:'text-purple-600'},
     {v:nOrders,l:'Orders',c:'text-blue-600'}, {v:nInv,l:'Inventory SKUs',c:'text-cyan-600'},
@@ -292,18 +272,15 @@ async function loadOverview() {
   document.getElementById('order-dist').innerHTML = Object.entries(dist).sort((a,b)=>b[1]-a[1]).map(([s,c])=>`<div class="flex items-center justify-between py-1"><span class="text-xs px-2 py-0.5 rounded-full ${badge(s)}">${s}</span><span class="text-sm font-semibold">${c}</span></div>`).join('');
 
   // Brand distribution
-  const brands = {};
-  const allProds = await sb('/products?select=brand');
-  allProds.forEach(p => brands[p.brand] = (brands[p.brand]||0)+1);
-  document.getElementById('brand-dist').innerHTML = Object.entries(brands).sort((a,b)=>b[1]-a[1]).map(([b,c])=>`<div class="flex items-center justify-between py-1"><span class="text-sm">${b}</span><span class="text-sm font-semibold">${c}</span></div>`).join('');
+  document.getElementById('brand-dist').innerHTML = STRIDE_DATA.brands.map(r=>`<div class="flex items-center justify-between py-1"><span class="text-sm">${r.brand}</span><span class="text-sm font-semibold">${r.cnt}</span></div>`).join('');
 }
 loadOverview();
 
 // ── EMAILS ──
 async function loadEmails(q='') {
-  let path = '/emails?select=*,customers(first_name,last_name)&order=received_at.desc&limit=100';
-  if(q) path += `&or=(subject.ilike.*${q}*,body.ilike.*${q}*)`;
-  const emails = await sb(path);
+  let emails = STRIDE_DATA.emails;
+  if(q) { const ql=q.toLowerCase(); emails=emails.filter(e=>e.subject.toLowerCase().includes(ql)||e.body.toLowerCase().includes(ql)); }
+  emails = emails.map(e=>({...e, customers: e.first_name ? {first_name:e.first_name,last_name:e.last_name} : null}));
   document.getElementById('email-list').innerHTML = `<div class="space-y-2">${emails.map(e=>`
     <div class="bg-white rounded-lg border p-4 hover:border-indigo-300 cursor-pointer ${e.is_read?'opacity-60':''}" onclick="openEmail(${e.id})">
       <div class="flex items-start justify-between">
@@ -321,7 +298,9 @@ async function loadEmails(q='') {
 document.getElementById('email-search').addEventListener('input', debounce(e=>loadEmails(e.target.value),300));
 
 async function openEmail(id) {
-  const e = (await sb(`/emails?id=eq.${id}&select=*,customers(first_name,last_name)`))[0];
+  const raw = STRIDE_DATA.emails.find(e=>e.id===id);
+  const e = raw ? {...raw, customers: raw.first_name ? {first_name:raw.first_name,last_name:raw.last_name} : null} : null;
+  if(!e) return;
   document.getElementById('email-detail-content').innerHTML = `
     <div class="flex justify-between mb-4"><h2 class="text-lg font-bold">${e.subject}</h2><button onclick="document.getElementById('email-detail').classList.add('hidden')" class="text-gray-400 text-xl">&times;</button></div>
     <div class="text-sm text-gray-500 mb-1">From: <strong>${e.from_address}</strong> ${e.customers?'('+e.customers.first_name+' '+e.customers.last_name+')':''}</div>
@@ -332,9 +311,8 @@ async function openEmail(id) {
 
 // ── CUSTOMERS ──
 async function loadCustomers(q='') {
-  let path = '/customers?select=*&order=id&limit=100';
-  if(q) path += `&or=(first_name.ilike.*${q}*,last_name.ilike.*${q}*,email.ilike.*${q}*)`;
-  const custs = await sb(path);
+  let custs = STRIDE_DATA.customers;
+  if(q) { const ql=q.toLowerCase(); custs=custs.filter(c=>(c.first_name+' '+c.last_name).toLowerCase().includes(ql)||c.email.toLowerCase().includes(ql)); }
   document.getElementById('cust-list').innerHTML = `<div class="bg-white rounded-xl border overflow-hidden"><table class="w-full text-sm">
     <thead><tr class="bg-gray-50 text-xs text-gray-500 uppercase"><th class="px-4 py-3 text-left">ID</th><th class="px-4 py-3 text-left">Name</th><th class="px-4 py-3 text-left">Email</th><th class="px-4 py-3 text-left">City</th><th class="px-4 py-3 text-left">Loyalty</th></tr></thead>
     <tbody>${custs.map(c=>`<tr class="border-t hover:bg-gray-50"><td class="px-4 py-3 font-mono text-xs">#${c.id}</td><td class="px-4 py-3 font-semibold">${c.first_name} ${c.last_name}</td><td class="px-4 py-3 text-gray-500 text-xs">${c.email}</td><td class="px-4 py-3 text-xs">${c.city||''}, ${c.state||''}</td><td class="px-4 py-3">${c.loyalty_member?'<span class="bg-amber-100 text-amber-700 text-xs px-1.5 py-0.5 rounded-full">⭐ '+c.loyalty_points+'</span>':'—'}</td></tr>`).join('')}</tbody></table></div>
@@ -344,10 +322,9 @@ document.getElementById('cust-search').addEventListener('input', debounce(e=>loa
 
 // ── ORDERS ──
 async function loadOrders(q='',status='') {
-  let path = '/orders?select=*,customers(first_name,last_name,email)&order=order_date.desc&limit=100';
-  if(status) path += `&status=eq.${status}`;
-  if(q) path += `&or=(order_number.ilike.*${q}*)`;
-  const orders = await sb(path);
+  let orders = STRIDE_DATA.orders.map(o=>({...o, customers:{first_name:o.first_name,last_name:o.last_name,email:o.customer_email}}));
+  if(status) orders=orders.filter(o=>o.status===status);
+  if(q) { const ql=q.toLowerCase(); orders=orders.filter(o=>o.order_number.toLowerCase().includes(ql)); }
   document.getElementById('order-list').innerHTML = `<div class="bg-white rounded-xl border overflow-hidden"><table class="w-full text-sm">
     <thead><tr class="bg-gray-50 text-xs text-gray-500 uppercase"><th class="px-4 py-3 text-left">Order</th><th class="px-4 py-3 text-left">Customer</th><th class="px-4 py-3 text-left">Date</th><th class="px-4 py-3 text-left">Status</th><th class="px-4 py-3 text-left">Total</th><th class="px-4 py-3 text-left">Notes</th></tr></thead>
     <tbody>${orders.map(o=>`<tr class="border-t hover:bg-gray-50 cursor-pointer" onclick="openOrder(${o.id})"><td class="px-4 py-3 font-mono text-xs font-bold">${o.order_number}</td><td class="px-4 py-3 text-xs">${o.customers?o.customers.first_name+' '+o.customers.last_name:''}</td><td class="px-4 py-3 text-gray-500 text-xs">${o.order_date?.split('T')[0]||''}</td><td class="px-4 py-3"><span class="text-xs px-2 py-0.5 rounded-full ${badge(o.status)}">${o.status}</span></td><td class="px-4 py-3 font-semibold">$${o.total?.toFixed(2)}</td><td class="px-4 py-3 text-xs text-gray-500 max-w-[150px] truncate">${o.notes||''}</td></tr>`).join('')}</tbody></table></div>`;
@@ -356,8 +333,10 @@ document.getElementById('order-search').addEventListener('input', debounce(()=>l
 document.getElementById('order-status').addEventListener('change', ()=>loadOrders(document.getElementById('order-search').value,document.getElementById('order-status').value));
 
 async function openOrder(id) {
-  const o = (await sb(`/orders?id=eq.${id}&select=*,customers(first_name,last_name,email,phone)`))[0];
-  const items = await sb(`/order_items?order_id=eq.${id}&select=*`);
+  const raw = STRIDE_DATA.orders.find(o=>o.id===id);
+  if(!raw) return;
+  const o = {...raw, customers:{first_name:raw.first_name,last_name:raw.last_name,email:raw.customer_email,phone:''}};
+  const items = []; // Order items not in embedded data — show order summary only
   document.getElementById('order-detail-content').innerHTML = `
     <div class="flex justify-between mb-4"><h2 class="text-lg font-bold">${o.order_number}</h2><button onclick="document.getElementById('order-detail').classList.add('hidden')" class="text-gray-400 text-xl">&times;</button></div>
     <div class="grid md:grid-cols-2 gap-4 text-sm mb-4">
@@ -385,9 +364,8 @@ async function openOrder(id) {
 
 // ── PRODUCTS ──
 async function loadProducts(q='') {
-  let path = '/products?select=*&order=brand,model';
-  if(q) path += `&or=(brand.ilike.*${q}*,model.ilike.*${q}*,sku.ilike.*${q}*)`;
-  const prods = await sb(path);
+  let prods = STRIDE_DATA.products;
+  if(q) { const ql=q.toLowerCase(); prods=prods.filter(p=>(p.brand+' '+p.model+' '+p.sku).toLowerCase().includes(ql)); }
   document.getElementById('prod-list').innerHTML = `<div class="grid md:grid-cols-2 lg:grid-cols-3 gap-4">${prods.map(p=>`
     <div class="bg-white rounded-xl border p-4 hover:border-indigo-300 transition">
       <div class="flex justify-between mb-2"><div><div class="text-xs text-gray-400">${p.brand}</div><div class="font-bold">${p.model}</div></div><div class="text-lg font-bold text-indigo-600">$${p.price.toFixed(2)}</div></div>
@@ -399,7 +377,7 @@ document.getElementById('prod-search').addEventListener('input', debounce(e=>loa
 
 // ── TICKETS ──
 async function loadTickets() {
-  const tickets = await sb('/tickets?select=*,customers(first_name,last_name),orders(order_number)&order=created_at.desc');
+  const tickets = STRIDE_DATA.tickets.map(t=>({...t, customers:t.first_name?{first_name:t.first_name,last_name:t.last_name}:null, orders:t.order_number?{order_number:t.order_number}:null}));
   document.getElementById('ticket-list').innerHTML = `<div class="bg-white rounded-xl border overflow-hidden"><table class="w-full text-sm">
     <thead><tr class="bg-gray-50 text-xs text-gray-500 uppercase"><th class="px-4 py-3 text-left">Ticket</th><th class="px-4 py-3 text-left">Customer</th><th class="px-4 py-3 text-left">Subject</th><th class="px-4 py-3 text-left">Priority</th><th class="px-4 py-3 text-left">Status</th><th class="px-4 py-3 text-left">Created</th></tr></thead>
     <tbody>${tickets.map(t=>`<tr class="border-t hover:bg-gray-50"><td class="px-4 py-3 font-mono text-xs font-bold">${t.ticket_number}</td><td class="px-4 py-3 text-xs">${t.customers?t.customers.first_name+' '+t.customers.last_name:''}</td><td class="px-4 py-3 text-xs max-w-[200px] truncate">${t.subject}</td><td class="px-4 py-3"><span class="text-xs px-2 py-0.5 rounded-full ${{urgent:'bg-red-100 text-red-700',high:'bg-amber-100 text-amber-700',normal:'bg-gray-100 text-gray-600'}[t.priority]||'bg-gray-100'}">${t.priority}</span></td><td class="px-4 py-3"><span class="text-xs px-2 py-0.5 rounded-full ${badge(t.status)}">${t.status}</span></td><td class="px-4 py-3 text-xs text-gray-500">${t.created_at?.split('T')[0]||''}</td></tr>`).join('')}</tbody></table></div>`;
